@@ -20,6 +20,11 @@ results/*
 # Jupyter
 .ipynb_checkpoints/
 
+# Raw historical market data
+data/raw/*.csv
+data/raw/*.zip
+data/raw/*.parquet
+
 # VS Code
 .vscode/
 
