@@ -18,7 +18,7 @@ FILES = {
 
 
 def load_market_data(symbol: str, file_path: Path) -> pd.DataFrame:
-    """Load one raw M1 CSV and perform basic validation."""
+    """Load one raw MT5 M1 CSV and perform basic validation."""
 
     print(f"\n{'=' * 60}")
     print(f"Loading {symbol}")
@@ -29,35 +29,32 @@ def load_market_data(symbol: str, file_path: Path) -> pd.DataFrame:
             f"Could not find {symbol} data at:\n{file_path}"
         )
 
+    # MT5 exports tab-separated data
     df = pd.read_csv(file_path, sep="\t")
 
     print(f"Rows loaded: {len(df):,}")
-    print(f"Columns: {list(df.columns)}")
+    print(f"Original columns: {list(df.columns)}")
 
-    # --------------------------------------------------------
-    # Normalize column names
-    # --------------------------------------------------------
-
+    # Normalize MT5 column names
     df.columns = [column.strip().upper() for column in df.columns]
 
-column_mapping = {
-    "<DATE>": "Date",
-    "<TIME>": "Time",
-    "<OPEN>": "Open",
-    "<HIGH>": "High",
-    "<LOW>": "Low",
-    "<CLOSE>": "Close",
-    "<TICKVOL>": "Tick Volume",
-    "<VOL>": "Volume",
-    "<SPREAD>": "Spread",
-}
+    column_mapping = {
+        "<DATE>": "Date",
+        "<TIME>": "Time",
+        "<OPEN>": "Open",
+        "<HIGH>": "High",
+        "<LOW>": "Low",
+        "<CLOSE>": "Close",
+        "<TICKVOL>": "Tick Volume",
+        "<VOL>": "Volume",
+        "<SPREAD>": "Spread",
+    }
 
-df = df.rename(columns=column_mapping)
+    df = df.rename(columns=column_mapping)
 
-    # --------------------------------------------------------
+    print(f"Normalized columns: {list(df.columns)}")
+
     # Required columns
-    # --------------------------------------------------------
-
     required_columns = [
         "Date",
         "Time",
@@ -68,7 +65,8 @@ df = df.rename(columns=column_mapping)
     ]
 
     missing_columns = [
-        column for column in required_columns
+        column
+        for column in required_columns
         if column not in df.columns
     ]
 
@@ -77,10 +75,7 @@ df = df.rename(columns=column_mapping)
             f"{symbol} is missing required columns: {missing_columns}"
         )
 
-    # --------------------------------------------------------
     # Combine Date + Time
-    # --------------------------------------------------------
-
     df["Datetime"] = pd.to_datetime(
         df["Date"].astype(str) + " " + df["Time"].astype(str),
         errors="coerce",
@@ -93,24 +88,13 @@ df = df.rename(columns=column_mapping)
             f"{symbol}: {invalid_dates:,} invalid timestamps found."
         )
 
-    # --------------------------------------------------------
     # Sort chronologically
-    # --------------------------------------------------------
-
     df = df.sort_values("Datetime").reset_index(drop=True)
 
-    # --------------------------------------------------------
-    # Remove unusable 2020 data
-    #
-    # Our current V3 testing period begins in 2021.
-    # --------------------------------------------------------
-
+    # Use 2021 onward for the first V3 test
     df = df[df["Datetime"] >= "2021-01-01"].copy()
 
-    # --------------------------------------------------------
-    # Numeric conversion
-    # --------------------------------------------------------
-
+    # Convert price columns to numeric
     price_columns = [
         "Open",
         "High",
@@ -124,10 +108,7 @@ df = df.rename(columns=column_mapping)
             errors="coerce",
         )
 
-    # --------------------------------------------------------
-    # Check missing values
-    # --------------------------------------------------------
-
+    # Check missing prices
     missing_prices = df[price_columns].isna().sum()
 
     if missing_prices.any():
@@ -135,16 +116,10 @@ df = df.rename(columns=column_mapping)
             f"{symbol}: Missing price values:\n{missing_prices}"
         )
 
-    # --------------------------------------------------------
     # Check duplicate timestamps
-    # --------------------------------------------------------
-
     duplicates = df["Datetime"].duplicated().sum()
 
-    # --------------------------------------------------------
     # Check OHLC integrity
-    # --------------------------------------------------------
-
     invalid_ohlc = (
         (df["High"] < df["Open"])
         | (df["High"] < df["Close"])
@@ -153,10 +128,7 @@ df = df.rename(columns=column_mapping)
         | (df["Low"] > df["Close"])
     ).sum()
 
-    # --------------------------------------------------------
     # Report
-    # --------------------------------------------------------
-
     print(f"Valid rows after 2020 removal: {len(df):,}")
     print(f"First valid candle: {df['Datetime'].iloc[0]}")
     print(f"Last candle:         {df['Datetime'].iloc[-1]}")
@@ -169,10 +141,7 @@ df = df.rename(columns=column_mapping)
     if invalid_ohlc:
         print("WARNING: Invalid OHLC candles detected.")
 
-    # --------------------------------------------------------
-    # Keep only useful columns for now
-    # --------------------------------------------------------
-
+    # Keep useful columns
     keep_columns = [
         "Datetime",
         "Open",
@@ -191,15 +160,13 @@ df = df.rename(columns=column_mapping)
         if column in df.columns:
             keep_columns.append(column)
 
-    df = df[keep_columns].copy()
-
-    return df
+    return df[keep_columns].copy()
 
 
 def main():
     print("\n")
     print("=" * 60)
-    print("        EMA-ADX TRADING SYSTEM — V3.0")
+    print("        EMA-ADX TRADING SYSTEM - V3.0")
     print("              DATA ENGINE TEST")
     print("=" * 60)
 
@@ -218,7 +185,7 @@ def main():
 
     for symbol, df in datasets.items():
         print(
-            f"{symbol:10} → {len(df):,} valid M1 candles"
+            f"{symbol:10} -> {len(df):,} valid M1 candles"
         )
 
     print("\nV3.0 data engine test complete.")
