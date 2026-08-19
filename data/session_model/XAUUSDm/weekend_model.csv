@@ -1,0 +1,6 @@
+previous_weekday,current_weekday,occurrences,median_gap_minutes,min_gap_minutes,max_gap_minutes,unique_dates,years
+Friday,Sunday,250,2948.0,2886.0,3201.0,250,6
+Sunday,Sunday,19,5.0,2.0,21.0,15,3
+Sunday,Monday,9,2.0,2.0,2.0,9,1
+Thursday,Sunday,6,4388.0,4384.0,4389.0,6,6
+Friday,Monday,4,4386.0,4384.0,4388.0,4,2

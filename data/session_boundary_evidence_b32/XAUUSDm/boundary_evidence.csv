@@ -1,0 +1,4 @@
+family_id,occurrences,b31_occurrences,unique_dates,unique_years,previous_time,current_time,median_gap_minutes,gap_std,before_context_availability,after_context_availability,boundary_strength,classification
+P30_C35_D64,446,619,619,6,20:57,22:01,64.0,507.9278024400323,1.0,1.0,594.24,VARIABLE_BOUNDARY
+P33_C39_D64,198,319,319,6,21:57,23:01,64.0,733.3329417850754,1.0,0.9848484848484849,306.24,VARIABLE_BOUNDARY
+P41_C1_D2,59,50,50,2,23:58,00:00,2.0,0.0,1.0,1.0,31.333333333333336,SHORT_RECURRING_GAP

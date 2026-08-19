@@ -1,0 +1,4 @@
+family_id,previous,current,gap_minutes,before_count,after_count,before_complete,after_complete
+P27_C27_D2,2021-08-17 04:26:00,2021-08-17 04:28:00,2.0,11,9,True,False
+P24_C24_D2,2021-08-17 03:55:00,2021-08-17 03:57:00,2.0,9,10,False,False
+P20_C20_D2,2021-08-17 03:16:00,2021-08-17 03:18:00,2.0,11,11,True,True
