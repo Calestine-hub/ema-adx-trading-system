@@ -1,0 +1,90 @@
+EMA-ADX TRADING SYSTEM - V3.0
+B3.4 SESSION BOUNDARY CONTEXT VALIDATION
+INSTRUMENT: XAUUSDm
+
+======================================================================
+PURPOSE
+Validate M1 candle context around known recurring boundary families and compare them with unclassified gaps.
+
+B3.4 IS EVIDENCE ONLY.
+No production session rule is created by this script.
+session_validator.py is not modified.
+
+======================================================================
+OVERALL
+======================================================================
+Known boundary contexts: 997
+Unclassified gap contexts: 426
+Known contexts with full 5-candle before context: 100.00%
+Known contexts with full 5-candle after context: 100.00%
+Known contexts with continuous surrounding data: 99.70%
+Unclassified contexts with full 5-candle before context: 100.00%
+Unclassified contexts with full 5-candle after context: 100.00%
+Unclassified contexts with continuous surrounding data: 90.61%
+
+======================================================================
+KNOWN FAMILY CONTEXT
+======================================================================
+
+Family: P30_C35_D64
+  Occurrences: 619
+  Unique dates: 619
+  Years: 6
+  Gap median: 64.00 min
+  Gap range: 63.00 - 65.00 min
+  Full before context: 100.00%
+  Full after context: 100.00%
+  Continuous context: 100.00%
+  Internal before gaps: 0
+  Internal after gaps: 0
+
+Family: P33_C39_D64
+  Occurrences: 319
+  Unique dates: 319
+  Years: 6
+  Gap median: 64.00 min
+  Gap range: 63.00 - 65.00 min
+  Full before context: 100.00%
+  Full after context: 100.00%
+  Continuous context: 99.06%
+  Internal before gaps: 0
+  Internal after gaps: 3
+
+Family: P41_C1_D2
+  Occurrences: 59
+  Unique dates: 59
+  Years: 2
+  Gap median: 2.00 min
+  Gap range: 2.00 - 2.00 min
+  Full before context: 100.00%
+  Full after context: 100.00%
+  Continuous context: 100.00%
+  Internal before gaps: 0
+  Internal after gaps: 0
+
+======================================================================
+UNCLASSIFIED CONTROL GROUP
+======================================================================
+Occurrences: 426
+Unique dates: 397
+Years: 6
+Gap median: 2947.00 min
+Gap range: 2.00 - 4389.00 min
+Full before context: 100.00%
+Full after context: 100.00%
+Continuous context: 90.61%
+
+======================================================================
+B3.4 INTERPRETATION GUIDANCE
+======================================================================
+1. High recurrence alone does not make a gap valid.
+2. Exact clock times should not be hard-coded without historical tolerance.
+3. P30 and P33 should be evaluated together because their historical clock regimes differ by approximately one hour.
+4. P41 should remain a separate phenomenon until its context establishes otherwise.
+5. Unclassified gaps provide the control group.
+6. No data should be forward-filled or invented.
+7. The final production validator should preserve unexpected gaps rather than silently deleting them.
+8. The final session model should be evidence-based and should not overfit exact historical timestamps.
+
+NEXT STAGE:
+Review B3.4 results and define the final XAUUSD session model before modifying session_validator.py.

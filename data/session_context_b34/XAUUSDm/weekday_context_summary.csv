@@ -1,0 +1,14 @@
+family_id,weekday,occurrences,median_gap_minutes,continuous_context_pct
+P30_C35_D64,Monday,149,64.0,100.0
+P30_C35_D64,Tuesday,160,64.0,100.0
+P30_C35_D64,Wednesday,157,64.0,100.0
+P30_C35_D64,Thursday,153,64.0,100.0
+P33_C39_D64,Monday,73,64.0,100.0
+P33_C39_D64,Tuesday,85,64.0,97.6470588235294
+P33_C39_D64,Wednesday,83,64.0,98.79518072289156
+P33_C39_D64,Thursday,78,64.0,100.0
+P41_C1_D2,Monday,15,2.0,100.0
+P41_C1_D2,Tuesday,13,2.0,100.0
+P41_C1_D2,Wednesday,12,2.0,100.0
+P41_C1_D2,Thursday,10,2.0,100.0
+P41_C1_D2,Sunday,9,2.0,100.0

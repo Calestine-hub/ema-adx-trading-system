@@ -1,0 +1,2 @@
+category,occurrences,unique_dates,years,median_gap_minutes,min_gap_minutes,max_gap_minutes,full_before_context_pct,full_after_context_pct,continuous_context_pct,internal_before_gaps,internal_after_gaps
+UNCLASSIFIED,426,397,6,2947.0,2.0,4389.0,100.0,100.0,90.61032863849765,23,20

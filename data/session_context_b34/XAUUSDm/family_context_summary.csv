@@ -1,0 +1,4 @@
+family_id,occurrences,unique_dates,years,median_gap_minutes,min_gap_minutes,max_gap_minutes,full_before_context_pct,full_after_context_pct,continuous_context_pct,internal_before_gaps,internal_after_gaps,median_before_after_price_change
+P30_C35_D64,619,619,6,64.0,63.0,65.0,100.0,100.0,100.0,0,0,0.21400000000016917
+P33_C39_D64,319,319,6,64.0,63.0,65.0,100.0,100.0,99.05956112852664,0,3,0.1330000000000382
+P41_C1_D2,59,59,2,2.0,2.0,2.0,100.0,100.0,100.0,0,0,-0.010999999999967258
