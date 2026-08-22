@@ -1,0 +1,33 @@
+EMA-ADX TRADING SYSTEM - V3.0
+PRODUCTION SESSION MODEL: USDCHFm
+======================================================================
+
+Rules applied (see session_validator.py docstring for evidence):
+  EXPECTED_DAILY_MAINTENANCE  55-75 min, Mon-Fri, 20:xx/21:xx start
+  EXPECTED_DAILY_ROLLOVER      <=5 min, 23:5x -> 00:0x
+  EXPECTED_WEEKEND_CLOSURE     touches Sat/Sun, Fri->Mon, or >=20h
+  UNEXPECTED_*                 anything else - flagged, not hidden
+
+15M candle status:
+  COMPLETE                       114,902  ( 65.66%)
+  SESSION_CLOSED_EXPECTED         50,557  ( 28.89%)
+  UNEXPECTED_INCOMPLETE            8,386  (  4.79%)
+  EXPECTED_INCOMPLETE              1,109  (  0.63%)
+  UNEXPECTED_NO_DATA                  34  (  0.02%)
+
+4H candle status:
+  COMPLETE                         5,732  ( 52.41%)
+  SESSION_CLOSED_EXPECTED          2,894  ( 26.46%)
+  UNEXPECTED_INCOMPLETE            1,842  ( 16.84%)
+  EXPECTED_INCOMPLETE                469  (  4.29%)
+
+Unexpected M1 gaps: 15,606 (see gap_classification.csv)
+
+PRODUCTION RULE FOR THE STRATEGY TESTER:
+  - COMPLETE candles: safe to use.
+  - EXPECTED_INCOMPLETE / SESSION_CLOSED_EXPECTED: real market
+    behaviour (maintenance/rollover/weekend). Never fabricate the
+    missing minutes - the backtester must skip signal generation
+    where indicators would depend on data that doesn't exist.
+  - UNEXPECTED_INCOMPLETE / UNEXPECTED_NO_DATA: exclude from
+    backtesting until manually reviewed in gap_classification.csv.

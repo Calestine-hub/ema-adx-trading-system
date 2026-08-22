@@ -1,47 +1,80 @@
-
 """
 EMA-ADX TRADING SYSTEM - V3.0
-SESSION-AWARE CANDLE VALIDATOR
+SESSION VALIDATOR - PRODUCTION MODEL
 
-Purpose:
-    Distinguish expected broker-session closures from unexpected
-    intraday data gaps.
+Purpose
+-------
+This is the PRODUCTION session-aware candle validator. It replaces the
+exploratory/diagnostic scripts (B3.1-B3.4) with a single evidence-based
+rule set and turns that rule set into candle-level status flags that
+downstream code (indicators, the strategy tester) can use directly.
 
-The validator works from the original M1 data and classifies
-15-minute and 4-hour candle periods without filling missing prices.
+This module is now the ONLY 15M/4H candle builder in the project.
+candle_engine.py has been retired - it built higher-timeframe candles
+without any gap-cause awareness (just raw M1_Count vs Expected_M1),
+which is exactly the "might build imaginary/misleading candles" risk
+this production model exists to remove. Use
+build_session_aware_candles() for all future 15M/4H candle needs.
 
-IMPORTANT:
-    MetaTrader exported files may be TAB-separated rather than
-    comma-separated. This loader automatically detects the separator.
+The rules below are NOT guesses. They come from B3.1-B3.4 evidence
+gathered on XAUUSDm M1 data (2021-08 to 2026-08, ~1.76M M1 candles):
 
-PERFORMANCE:
-    This version is optimized for large M1 datasets.
+    EXPECTED_DAILY_MAINTENANCE
+        A ~60-70 minute gap that occurs once per weekday, in the
+        evening. It appears at two different clock times about an
+        hour apart (broker-server DST handling, not two different
+        real events):
+            P30_C35_D64: ~20:57 -> ~22:01   (619 occurrences)
+            P33_C39_D64: ~21:57 -> ~23:01   (319 occurrences)
 
-    Improvements:
-        1. Gap analysis is vectorized with pandas.
-        2. Candle validation uses DatetimeIndex.searchsorted()
-           instead of repeatedly scanning the entire M1 DataFrame.
-        3. Stage execution times are displayed.
+    EXPECTED_DAILY_ROLLOVER
+        A ~2 minute gap from 23:58 -> 00:00, present from 2023
+        onward (59 occurrences). Absent 2021-2022 - this is a
+        genuine platform-behaviour change, not an error.
+
+    EXPECTED_WEEKEND_CLOSURE
+        Friday close -> Sunday/Monday open, or any gap that touches
+        a Saturday/Sunday, or any gap >= 20 hours (covers holiday
+        closures that don't land cleanly on a weekend boundary).
+
+    UNEXPECTED_*
+        Everything else. B3.4's "unclassified" control group (426
+        gaps, most of them weekend-shaped but some as short as 2
+        minutes) lives here until individually reviewed. These are
+        NEVER silently treated as missing-but-fine - they are
+        flagged so the strategy tester can see them.
+
+HARD RULES (do not violate)
+----------------------------
+    1. Never invent, forward-fill, or interpolate missing M1 data.
+    2. Never treat an UNEXPECTED gap as if it were EXPECTED.
+    3. Every 15M/4H candle gets an explicit Status - "COMPLETE" is
+       never assumed, it is proven from the underlying M1 count.
+    4. Higher-timeframe candles built from an EXPECTED gap are
+       labelled EXPECTED_INCOMPLETE / SESSION_CLOSED_EXPECTED, not
+       COMPLETE - they are real, but the indicator layer must decide
+       (later, explicitly) whether to trust them.
 """
 
 import time
+from pathlib import Path
 
 import pandas as pd
-from pathlib import Path
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data" / "raw"
+OUTPUT_DIR = PROJECT_ROOT / "data" / "session_model_production"
+
 SYMBOL_FILES = {
     "XAUUSDm": "XAUUSDm_M1_202108170000_202608131827.csv",
     "GBPUSDm": "GBPUSDm_M1_202108170000_202608131847.csv",
     "USDCHFm": "USDCHFm_M1_202108170000_202608131849.csv",
 }
-
-DATA_DIR = Path("data/raw")
-
 
 REQUIRED_COLUMNS = [
     "<DATE>",
@@ -52,54 +85,92 @@ REQUIRED_COLUMNS = [
     "<CLOSE>",
 ]
 
+TIMEFRAMES = {
+    "15M": 15,
+    "4H": 240,
+}
+
+# Evidence-derived thresholds (see module docstring)
+MAINTENANCE_MIN_MINUTES = 55
+MAINTENANCE_MAX_MINUTES = 75
+MAINTENANCE_HOURS = (20, 21)          # previous candle's hour must be 20:xx or 21:xx
+
+ROLLOVER_MAX_MINUTES = 5
+ROLLOVER_HOUR = 23
+ROLLOVER_MIN_MINUTE = 55              # previous candle must be >= 23:55
+
+WEEKEND_MIN_HOURS = 20                # gaps this long are closures even off-boundary
+
 
 # ============================================================
-# SESSION RULES
+# GAP CLASSIFICATION (PRODUCTION RULES)
 # ============================================================
 
 def classify_gap(previous_time, current_time):
     """
-    Classify an M1 timestamp gap.
+    Classify a single M1 timestamp gap using the B3.1-B3.4 evidence.
 
-    We deliberately do NOT call every large gap bad data.
-    Weekends and long market closures are expected.
+    Returns
+    -------
+    (classification: str, category: str)
+        category is one of "NORMAL", "EXPECTED", "UNEXPECTED".
+        UNEXPECTED gaps are NEVER folded into an EXPECTED bucket -
+        they must be individually reviewable.
     """
 
     gap = current_time - previous_time
     minutes = gap.total_seconds() / 60
 
-    # Normal consecutive M1 candles
-    if minutes == 1:
-        return "NORMAL"
+    if minutes <= 1:
+        return "NORMAL", "NORMAL"
 
-    # Friday -> Monday
-    if (
-        previous_time.weekday() == 4
-        and current_time.weekday() == 0
-    ):
-        return "EXPECTED_SESSION_CLOSURE"
+    # --------------------------------------------------------
+    # Weekend / holiday closure
+    # --------------------------------------------------------
 
-    # Saturday/Sunday related closure
-    if (
+    spans_weekend_day = (
         previous_time.weekday() >= 5
         or current_time.weekday() >= 5
+        or (previous_time.weekday() == 4 and current_time.weekday() == 0)
+    )
+
+    if spans_weekend_day or minutes >= WEEKEND_MIN_HOURS * 60:
+        return "EXPECTED_WEEKEND_CLOSURE", "EXPECTED"
+
+    # --------------------------------------------------------
+    # Daily rollover (23:5x -> 00:0x, ~2 minutes)
+    # --------------------------------------------------------
+
+    if (
+        minutes <= ROLLOVER_MAX_MINUTES
+        and previous_time.hour == ROLLOVER_HOUR
+        and previous_time.minute >= ROLLOVER_MIN_MINUTE
+        and current_time.date() != previous_time.date()
     ):
-        return "EXPECTED_SESSION_CLOSURE"
+        return "EXPECTED_DAILY_ROLLOVER", "EXPECTED"
 
-    # Large gap
-    if minutes >= 24 * 60:
-        return "EXPECTED_SESSION_CLOSURE"
+    # --------------------------------------------------------
+    # Daily maintenance (~60-70 minutes, evening, weekday)
+    # --------------------------------------------------------
 
-    # Short intraday gap
+    if (
+        MAINTENANCE_MIN_MINUTES <= minutes <= MAINTENANCE_MAX_MINUTES
+        and previous_time.weekday() < 5
+        and previous_time.hour in MAINTENANCE_HOURS
+    ):
+        return "EXPECTED_DAILY_MAINTENANCE", "EXPECTED"
+
+    # --------------------------------------------------------
+    # Everything else is genuinely unexpected - never disguised
+    # --------------------------------------------------------
+
     if minutes <= 5:
-        return "SHORT_DATA_GAP"
+        return "UNEXPECTED_SHORT_GAP", "UNEXPECTED"
 
-    # Medium intraday gap
     if minutes <= 60:
-        return "INTRADAY_DATA_GAP"
+        return "UNEXPECTED_INTRADAY_GAP", "UNEXPECTED"
 
-    # Long intraday gap
-    return "LONG_DATA_GAP"
+    return "UNEXPECTED_LONG_GAP", "UNEXPECTED"
 
 
 # ============================================================
@@ -107,656 +178,320 @@ def classify_gap(previous_time, current_time):
 # ============================================================
 
 def load_m1(filepath):
-    """
-    Load MetaTrader exported M1 CSV.
-
-    Supports:
-        - TAB-separated files
-        - comma-separated files
-        - semicolon-separated files
-
-    The files provided by the user are TAB-separated.
-    """
+    """Load one MetaTrader-exported M1 CSV (TAB/COMMA/SEMICOLON)."""
 
     filepath = Path(filepath)
 
     if not filepath.exists():
-        raise FileNotFoundError(
-            f"File does not exist: {filepath}"
-        )
+        raise FileNotFoundError(f"File does not exist: {filepath}")
 
-    print("\nLoading file:")
-    print(f"    {filepath}")
+    print(f"\nLoading file:\n    {filepath}")
 
-    # --------------------------------------------------------
-    # Detect separator
-    # --------------------------------------------------------
-
-    with open(
-        filepath,
-        "r",
-        encoding="utf-8-sig",
-        errors="replace",
-    ) as f:
-
+    with open(filepath, "r", encoding="utf-8-sig", errors="replace") as f:
         first_line = f.readline()
 
     if "\t" in first_line:
-        separator = "\t"
-        separator_name = "TAB"
-
+        separator, separator_name = "\t", "TAB"
     elif "," in first_line:
-        separator = ","
-        separator_name = "COMMA"
-
+        separator, separator_name = ",", "COMMA"
     elif ";" in first_line:
-        separator = ";"
-        separator_name = "SEMICOLON"
-
+        separator, separator_name = ";", "SEMICOLON"
     else:
-        raise ValueError(
-            "Could not detect CSV separator."
-        )
+        raise ValueError("Could not detect CSV separator.")
 
-    print(
-        f"Detected separator: {separator_name}"
-    )
+    print(f"Detected separator: {separator_name}")
 
-    # --------------------------------------------------------
-    # Read file
-    # --------------------------------------------------------
+    df = pd.read_csv(filepath, sep=separator, encoding="utf-8-sig")
+    df.columns = df.columns.astype(str).str.strip()
 
-    df = pd.read_csv(
-        filepath,
-        sep=separator,
-        encoding="utf-8-sig",
-    )
-
-    # --------------------------------------------------------
-    # Clean column names
-    # --------------------------------------------------------
-
-    df.columns = (
-        df.columns
-        .astype(str)
-        .str.strip()
-    )
-
-    print("\nDetected columns:")
-    print(df.columns.tolist())
-
-    # --------------------------------------------------------
-    # Validate required columns
-    # --------------------------------------------------------
-
-    missing_columns = [
-        column
-        for column in REQUIRED_COLUMNS
-        if column not in df.columns
-    ]
-
+    missing_columns = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing_columns:
-
-        raise ValueError(
-            "Missing required columns: "
-            + ", ".join(missing_columns)
-        )
-
-    # --------------------------------------------------------
-    # Combine DATE + TIME
-    # --------------------------------------------------------
+        raise ValueError("Missing required columns: " + ", ".join(missing_columns))
 
     df["Datetime"] = pd.to_datetime(
-        df["<DATE>"].astype(str).str.strip()
-        + " "
-        + df["<TIME>"].astype(str).str.strip(),
+        df["<DATE>"].astype(str).str.strip() + " " + df["<TIME>"].astype(str).str.strip(),
         format="%Y.%m.%d %H:%M:%S",
         errors="coerce",
     )
 
-    # --------------------------------------------------------
-    # Check invalid timestamps
-    # --------------------------------------------------------
-
     invalid_datetime = df["Datetime"].isna().sum()
-
     if invalid_datetime > 0:
+        raise ValueError(f"Found {invalid_datetime:,} invalid Datetime values.")
 
-        raise ValueError(
-            f"Found {invalid_datetime:,} invalid "
-            f"Datetime values."
-        )
-
-    # --------------------------------------------------------
-    # Sort chronologically
-    # --------------------------------------------------------
-
-    df = (
-        df.sort_values("Datetime")
-        .reset_index(drop=True)
-    )
-
-    # --------------------------------------------------------
-    # Remove duplicate timestamps
-    # --------------------------------------------------------
+    df = df.sort_values("Datetime").reset_index(drop=True)
 
     duplicates = df["Datetime"].duplicated().sum()
-
     if duplicates > 0:
+        print(f"\nWARNING: {duplicates:,} duplicate timestamps found. Keeping first.")
+        df = df.drop_duplicates(subset=["Datetime"], keep="first").reset_index(drop=True)
 
-        print(
-            f"\nWARNING: "
-            f"{duplicates:,} duplicate timestamps found."
-        )
-
-        df = (
-            df.drop_duplicates(
-                subset=["Datetime"],
-                keep="first",
-            )
-            .reset_index(drop=True)
-        )
-
-    # --------------------------------------------------------
-    # Convert OHLC columns to numeric
-    # --------------------------------------------------------
-
-    numeric_columns = [
-        "<OPEN>",
-        "<HIGH>",
-        "<LOW>",
-        "<CLOSE>",
-    ]
-
+    numeric_columns = ["<OPEN>", "<HIGH>", "<LOW>", "<CLOSE>"]
     for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
 
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce",
-        )
-
-    # --------------------------------------------------------
-    # Check invalid OHLC values
-    # --------------------------------------------------------
-
-    invalid_ohlc = (
-        df[numeric_columns]
-        .isna()
-        .any(axis=1)
-        .sum()
-    )
-
+    invalid_ohlc = df[numeric_columns].isna().any(axis=1).sum()
     if invalid_ohlc > 0:
-
-        raise ValueError(
-            f"Found {invalid_ohlc:,} rows "
-            f"with invalid OHLC values."
-        )
-
-    # --------------------------------------------------------
-    # Standardize OHLC names
-    # --------------------------------------------------------
+        raise ValueError(f"Found {invalid_ohlc:,} rows with invalid OHLC values.")
 
     df["Open"] = df["<OPEN>"]
     df["High"] = df["<HIGH>"]
     df["Low"] = df["<LOW>"]
     df["Close"] = df["<CLOSE>"]
 
-    print(
-        f"\nSuccessfully loaded "
-        f"{len(df):,} M1 candles."
-    )
+    print(f"\nSuccessfully loaded {len(df):,} M1 candles.")
+    print(f"First candle: {df['Datetime'].iloc[0]}")
+    print(f"Last candle:  {df['Datetime'].iloc[-1]}")
 
-    print(
-        f"First candle: "
-        f"{df['Datetime'].iloc[0]}"
-    )
-
-    print(
-        f"Last candle:  "
-        f"{df['Datetime'].iloc[-1]}"
-    )
-
-    return df
+    return df[["Datetime", "Open", "High", "Low", "Close"]].copy()
 
 
 # ============================================================
-# GAP ANALYSIS - OPTIMIZED
+# GAP TABLE (VECTORIZED)
 # ============================================================
 
-def analyze_gaps(m1):
+def build_gap_table(m1):
     """
-    Analyze timestamp gaps using vectorized pandas operations.
-
-    The previous implementation performed millions of Python-level
-    .iloc[] operations.
-
-    This version calculates all timestamp differences at once and
-    only iterates over the relatively small set of actual gaps.
+    Build a table of every M1 timestamp gap > 1 minute, classified
+    with the production rules above. This table is the single
+    source of truth for "why is this candle incomplete".
     """
 
     timestamps = m1["Datetime"]
+    deltas = timestamps.diff()
 
-    # --------------------------------------------------------
-    # Calculate all timestamp differences at once
-    # --------------------------------------------------------
+    gap_mask = deltas > pd.Timedelta(minutes=1)
+    gap_positions = deltas.index[gap_mask]
 
-    gaps = timestamps.diff()
-
-    # --------------------------------------------------------
-    # Keep only gaps greater than one minute
-    # --------------------------------------------------------
-
-    gap_mask = gaps > pd.Timedelta(minutes=1)
-
-    gap_indices = gaps.index[gap_mask]
-
-    if len(gap_indices) == 0:
-
+    if len(gap_positions) == 0:
         return pd.DataFrame(
-            columns=[
-                "previous",
-                "current",
-                "gap",
-                "classification",
-            ]
+            columns=["previous", "current", "gap_minutes", "classification", "category"]
         )
 
-    # --------------------------------------------------------
-    # Extract only actual gap rows
-    # --------------------------------------------------------
+    current_times = timestamps.loc[gap_positions].reset_index(drop=True)
+    previous_times = timestamps.loc[gap_positions - 1].reset_index(drop=True)
+    gap_minutes = (current_times - previous_times).dt.total_seconds() / 60
 
-    current_times = timestamps.loc[gap_indices]
-    previous_times = timestamps.loc[gap_indices - 1]
-    gap_values = gaps.loc[gap_indices]
+    classifications = []
+    categories = []
 
-    # --------------------------------------------------------
-    # Classify only the actual gaps
-    # --------------------------------------------------------
+    for previous_time, current_time in zip(previous_times, current_times):
+        classification, category = classify_gap(previous_time, current_time)
+        classifications.append(classification)
+        categories.append(category)
 
-    classifications = [
-        classify_gap(
-            previous_time,
-            current_time,
-        )
-        for previous_time, current_time
-        in zip(
-            previous_times,
-            current_times,
-        )
-    ]
-
-    # --------------------------------------------------------
-    # Build result
-    # --------------------------------------------------------
-
-    results = pd.DataFrame(
+    return pd.DataFrame(
         {
-            "previous": previous_times.values,
-            "current": current_times.values,
-            "gap": gap_values.values,
+            "previous": previous_times,
+            "current": current_times,
+            "gap_minutes": gap_minutes.values,
             "classification": classifications,
+            "category": categories,
         }
     )
 
-    return results
-
 
 # ============================================================
-# PRINT GAP SUMMARY
+# SESSION-AWARE CANDLE BUILDER (PRODUCTION)
 # ============================================================
 
-def print_gap_summary(gaps, symbol):
+def build_session_aware_candles(m1, gap_table, timeframe_minutes):
+    """
+    Build higher-timeframe candles from M1 data with an explicit,
+    evidence-based Status on every single candle. No candle is ever
+    fabricated - OHLC values come only from real M1 data that exists
+    inside that period.
 
-    print("\n")
-    print("=" * 70)
+    Status values
+    -------------
+    COMPLETE                 full M1 count, safe to use as-is
+    EXPECTED_INCOMPLETE       partial M1 count, entirely explained by
+                              known expected gaps (maintenance/rollover/
+                              weekend edge)
+    SESSION_CLOSED_EXPECTED  zero M1 candles, entirely explained by a
+                              known expected closure (weekend/holiday)
+    UNEXPECTED_INCOMPLETE     partial M1 count, at least one touching
+                              gap is NOT in the expected rule set
+    UNEXPECTED_NO_DATA        zero M1 candles and the cause is not a
+                              known expected closure - needs review
+    """
 
-    print(
-        f"SESSION-AWARE GAP ANALYSIS: {symbol}"
-    )
-
-    print("=" * 70)
-
-    if gaps.empty:
-
-        print("\nNo timestamp gaps detected.")
-
-        return
-
-    print("\nGap classification:")
-    print("-" * 70)
-
-    counts = (
-        gaps["classification"]
-        .value_counts()
-    )
-
-    for classification, count in counts.items():
-
-        print(
-            f"{classification:<30}"
-            f"{count:,}"
-        )
+    freq = f"{timeframe_minutes}min"
 
     # --------------------------------------------------------
-    # Unexpected gaps
+    # Vectorized OHLC + M1 count per period (fast, no fabrication:
+    # a period with zero M1 rows simply has NaN OHLC and is dropped
+    # from OHLC purposes but kept as a period for status purposes)
     # --------------------------------------------------------
 
-    print("\n")
-    print("Unexpected gaps:")
-    print("-" * 70)
+    indexed = m1.set_index("Datetime")
 
-    unexpected = gaps[
-        gaps["classification"].isin(
-            [
-                "SHORT_DATA_GAP",
-                "INTRADAY_DATA_GAP",
-                "LONG_DATA_GAP",
-            ]
-        )
+    ohlc = indexed.resample(freq).agg(
+        Open=("Open", "first"),
+        High=("High", "max"),
+        Low=("Low", "min"),
+        Close=("Close", "last"),
+        M1_Count=("Close", "count"),
+    )
+
+    candles = ohlc.reset_index()
+    candles["Expected_M1"] = timeframe_minutes
+    candles["Missing_M1"] = candles["Expected_M1"] - candles["M1_Count"]
+    candles["Status"] = "COMPLETE"
+    candles.loc[candles["Missing_M1"] > 0, "Status"] = "PENDING"
+
+    # --------------------------------------------------------
+    # Stamp only the periods actually touched by a real gap.
+    # This loops the (small) gap table, not the (large) period
+    # grid - far cheaper and ties every incomplete candle back
+    # to a specific, named cause.
+    # --------------------------------------------------------
+
+    touches = {}  # period Timestamp -> set of category strings
+
+    for row in gap_table.itertuples(index=False):
+        if row.category == "NORMAL":
+            continue
+
+        first_touched = row.previous.floor(freq)
+        last_touched = (row.current - pd.Timedelta(minutes=1)).floor(freq)
+
+        if last_touched < first_touched:
+            last_touched = first_touched
+
+        touched_periods = pd.date_range(first_touched, last_touched, freq=freq)
+
+        for period in touched_periods:
+            touches.setdefault(period, set()).add(row.category)
+
+    def resolve_status(row):
+        if row["Status"] != "PENDING":
+            return row["Status"]
+
+        categories = touches.get(row["Datetime"], set())
+
+        if row["M1_Count"] == 0:
+            if categories and "UNEXPECTED" not in categories:
+                return "SESSION_CLOSED_EXPECTED"
+            return "UNEXPECTED_NO_DATA"
+        else:
+            if categories and "UNEXPECTED" not in categories:
+                return "EXPECTED_INCOMPLETE"
+            return "UNEXPECTED_INCOMPLETE"
+
+    pending_mask = candles["Status"] == "PENDING"
+    candles.loc[pending_mask, "Status"] = candles.loc[pending_mask].apply(resolve_status, axis=1)
+
+    candles["GapCause"] = candles["Datetime"].map(
+        lambda p: "|".join(sorted(touches.get(p, []))) if p in touches else ""
+    )
+
+    return candles[
+        [
+            "Datetime",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "M1_Count",
+            "Expected_M1",
+            "Missing_M1",
+            "Status",
+            "GapCause",
+        ]
     ]
 
-    if unexpected.empty:
 
+# ============================================================
+# REPORTING
+# ============================================================
+
+def print_gap_summary(gap_table, symbol):
+    print("\n" + "=" * 70)
+    print(f"GAP CLASSIFICATION: {symbol}")
+    print("=" * 70)
+
+    if gap_table.empty:
+        print("No timestamp gaps detected.")
+        return
+
+    print("\nBy classification:")
+    print("-" * 70)
+    for classification, count in gap_table["classification"].value_counts().items():
+        print(f"{classification:<32}{count:,}")
+
+    unexpected = gap_table[gap_table["category"] == "UNEXPECTED"]
+
+    print(f"\nTotal gaps: {len(gap_table):,}")
+    print(f"Unexpected gaps: {len(unexpected):,}")
+
+    if not unexpected.empty:
+        print("\nUnexpected gaps (first 20):")
+        print("-" * 70)
         print(
-            "No unexpected gaps detected."
-        )
-
-    else:
-
-        print(
-            unexpected
+            unexpected[["previous", "current", "gap_minutes", "classification"]]
             .head(20)
             .to_string(index=False)
         )
 
-        print(
-            f"\nTotal unexpected gaps: "
-            f"{len(unexpected):,}"
-        )
 
-
-# ============================================================
-# CANDLE PERIOD VALIDATION - OPTIMIZED
-# ============================================================
-
-def validate_candle_period(
-    timestamps,
-    start_time,
-    timeframe_minutes,
-):
-    """
-    Validate one candle period using timestamp positions.
-
-    Instead of filtering the entire M1 DataFrame, we use
-    searchsorted() on the already-sorted DatetimeIndex.
-
-    This preserves the original validation logic while making
-    the operation dramatically faster.
-    """
-
-    end_time = (
-        start_time
-        + pd.Timedelta(
-            minutes=timeframe_minutes
-        )
-    )
-
-    # --------------------------------------------------------
-    # Find positions of period boundaries
-    # --------------------------------------------------------
-
-    start_position = timestamps.searchsorted(
-        start_time,
-        side="left",
-    )
-
-    end_position = timestamps.searchsorted(
-        end_time,
-        side="left",
-    )
-
-    # --------------------------------------------------------
-    # Number of M1 candles inside period
-    # --------------------------------------------------------
-
-    actual_minutes = (
-        end_position
-        - start_position
-    )
-
-    expected_minutes = timeframe_minutes
-
-    missing_minutes = (
-        expected_minutes
-        - actual_minutes
-    )
-
-    # --------------------------------------------------------
-    # Fully populated
-    # --------------------------------------------------------
-
-    if missing_minutes == 0:
-
-        return {
-            "status": "COMPLETE",
-            "expected": expected_minutes,
-            "actual": actual_minutes,
-            "missing": 0,
-        }
-
-    # --------------------------------------------------------
-    # No data
-    # --------------------------------------------------------
-
-    if actual_minutes == 0:
-
-        return {
-            "status": "SESSION_CLOSED",
-            "expected": expected_minutes,
-            "actual": 0,
-            "missing": expected_minutes,
-        }
-
-    # --------------------------------------------------------
-    # Check internal timestamp gaps
-    # --------------------------------------------------------
-
-    period_timestamps = timestamps[
-        start_position:end_position
-    ]
-
-    if len(period_timestamps) > 1:
-
-        internal_gaps = (
-            period_timestamps[1:]
-            - period_timestamps[:-1]
-        )
-
-        unexpected_internal_gap = (
-            internal_gaps
-            > pd.Timedelta(minutes=1)
-        ).any()
-
-    else:
-
-        unexpected_internal_gap = False
-
-    # --------------------------------------------------------
-    # Classify
-    # --------------------------------------------------------
-
-    if unexpected_internal_gap:
-
-        status = "INTRADAY_DATA_GAP"
-
-    else:
-
-        status = "SESSION_INCOMPLETE"
-
-    return {
-        "status": status,
-        "expected": expected_minutes,
-        "actual": actual_minutes,
-        "missing": missing_minutes,
-    }
-
-
-# ============================================================
-# BUILD VALIDATION TABLE - OPTIMIZED
-# ============================================================
-
-def validate_timeframe(
-    m1,
-    timeframe_minutes,
-):
-    """
-    Validate all periods for a timeframe.
-
-    Uses a sorted DatetimeIndex and searchsorted() so that each
-    period does not require scanning the entire M1 DataFrame.
-    """
-
-    # --------------------------------------------------------
-    # Create sorted DatetimeIndex once
-    # --------------------------------------------------------
-
-    timestamps = pd.DatetimeIndex(
-        m1["Datetime"]
-    )
-
-    first_time = (
-        timestamps.min()
-        .floor(
-            f"{timeframe_minutes}min"
-        )
-    )
-
-    last_time = (
-        timestamps.max()
-        .floor(
-            f"{timeframe_minutes}min"
-        )
-    )
-
-    periods = pd.date_range(
-        start=first_time,
-        end=last_time,
-        freq=f"{timeframe_minutes}min",
-    )
-
-    print(
-        f"Periods to validate: "
-        f"{len(periods):,}"
-    )
-
-    # --------------------------------------------------------
-    # Validate periods
-    # --------------------------------------------------------
-
-    results = []
-
-    total_periods = len(periods)
-
-    progress_interval = max(
-        1,
-        total_periods // 10,
-    )
-
-    for index, start_time in enumerate(
-        periods
-    ):
-
-        result = validate_candle_period(
-            timestamps,
-            start_time,
-            timeframe_minutes,
-        )
-
-        results.append(
-            {
-                "Datetime": start_time,
-                **result,
-            }
-        )
-
-        # ----------------------------------------------------
-        # Progress display
-        # ----------------------------------------------------
-
-        if (
-            (index + 1) % progress_interval == 0
-            or index == total_periods - 1
-        ):
-
-            percentage = (
-                (index + 1)
-                / total_periods
-                * 100
-            )
-
-            print(
-                f"  Progress: "
-                f"{index + 1:,}/"
-                f"{total_periods:,}"
-                f" ({percentage:5.1f}%)"
-            )
-
-    return pd.DataFrame(results)
-
-
-# ============================================================
-# TIMEFRAME SUMMARY
-# ============================================================
-
-def print_timeframe_summary(
-    validation,
-    timeframe_name,
-    symbol,
-):
-
-    print("\n")
+def print_timeframe_summary(candles, timeframe_name, symbol):
+    print("\n" + "-" * 70)
+    print(f"{symbol} | {timeframe_name} SESSION-AWARE CANDLES")
     print("-" * 70)
 
-    print(
-        f"{symbol} | {timeframe_name} "
-        f"SESSION VALIDATION"
-    )
-
-    print("-" * 70)
-
-    counts = (
-        validation["status"]
-        .value_counts()
-    )
-
-    total = len(validation)
+    counts = candles["Status"].value_counts()
+    total = len(candles)
 
     for status, count in counts.items():
+        print(f"{status:<28}{count:>10,}  ({count / total * 100:6.2f}%)")
 
-        percentage = (
-            count
-            / total
-            * 100
-        )
+    needs_review = candles[candles["Status"].isin(["UNEXPECTED_INCOMPLETE", "UNEXPECTED_NO_DATA"])]
+    print(f"\nCandles needing review (unexpected): {len(needs_review):,}")
 
-        print(
-            f"{status:<25}"
-            f"{count:>10,}"
-            f"  ({percentage:6.2f}%)"
-        )
 
-    print("-" * 70)
+def write_report(symbol, gap_table, candles_15m, candles_4h, output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    unexpected = validation[
-        validation["status"]
-        == "INTRADAY_DATA_GAP"
-    ]
+    gap_table.to_csv(output_dir / "gap_classification.csv", index=False)
+    candles_15m.to_csv(output_dir / "candles_15m.csv", index=False)
+    candles_4h.to_csv(output_dir / "candles_4h.csv", index=False)
 
-    print(
-        f"Unexpected incomplete candles: "
-        f"{len(unexpected):,}"
-    )
+    lines = []
+    lines.append("EMA-ADX TRADING SYSTEM - V3.0")
+    lines.append(f"PRODUCTION SESSION MODEL: {symbol}")
+    lines.append("=" * 70)
+    lines.append("")
+    lines.append("Rules applied (see session_validator.py docstring for evidence):")
+    lines.append("  EXPECTED_DAILY_MAINTENANCE  55-75 min, Mon-Fri, 20:xx/21:xx start")
+    lines.append("  EXPECTED_DAILY_ROLLOVER      <=5 min, 23:5x -> 00:0x")
+    lines.append("  EXPECTED_WEEKEND_CLOSURE     touches Sat/Sun, Fri->Mon, or >=20h")
+    lines.append("  UNEXPECTED_*                 anything else - flagged, not hidden")
+    lines.append("")
+
+    for timeframe_name, candles in [("15M", candles_15m), ("4H", candles_4h)]:
+        lines.append(f"{timeframe_name} candle status:")
+        counts = candles["Status"].value_counts()
+        total = len(candles)
+        for status, count in counts.items():
+            lines.append(f"  {status:<28}{count:>10,}  ({count / total * 100:6.2f}%)")
+        lines.append("")
+
+    unexpected_gaps = gap_table[gap_table["category"] == "UNEXPECTED"]
+    lines.append(f"Unexpected M1 gaps: {len(unexpected_gaps):,} (see gap_classification.csv)")
+    lines.append("")
+    lines.append("PRODUCTION RULE FOR THE STRATEGY TESTER:")
+    lines.append("  - COMPLETE candles: safe to use.")
+    lines.append("  - EXPECTED_INCOMPLETE / SESSION_CLOSED_EXPECTED: real market")
+    lines.append("    behaviour (maintenance/rollover/weekend). Never fabricate the")
+    lines.append("    missing minutes - the backtester must skip signal generation")
+    lines.append("    where indicators would depend on data that doesn't exist.")
+    lines.append("  - UNEXPECTED_INCOMPLETE / UNEXPECTED_NO_DATA: exclude from")
+    lines.append("    backtesting until manually reviewed in gap_classification.csv.")
+
+    with open(output_dir / "production_session_report.txt", "w") as f:
+        f.write("\n".join(lines))
+
+    print(f"\nWrote production outputs to: {output_dir}")
 
 
 # ============================================================
@@ -764,226 +499,56 @@ def print_timeframe_summary(
 # ============================================================
 
 def main():
-
     print("=" * 70)
-
-    print(
-        "       EMA-ADX TRADING SYSTEM - V3.0"
-    )
-
-    print(
-        "          SESSION VALIDATOR"
-    )
-
+    print("       EMA-ADX TRADING SYSTEM - V3.0")
+    print("       SESSION VALIDATOR - PRODUCTION MODEL")
     print("=" * 70)
-
-    # ========================================================
-    # PROCESS EACH SYMBOL
-    # ========================================================
 
     for symbol, filename in SYMBOL_FILES.items():
-
         symbol_start = time.perf_counter()
 
-        print("\n")
+        print("\n" + "=" * 70)
+        print(f"PROCESSING: {symbol}")
         print("=" * 70)
 
-        print(
-            f"Loading M1 data: {symbol}"
-        )
-
-        print("=" * 70)
-
-        filepath = (
-            DATA_DIR
-            / filename
-        )
+        filepath = DATA_DIR / filename
 
         try:
-
-            # ------------------------------------------------
-            # LOAD
-            # ------------------------------------------------
-
-            load_start = time.perf_counter()
-
-            m1 = load_m1(
-                filepath
-            )
-
-            load_time = (
-                time.perf_counter()
-                - load_start
-            )
-
-            print(
-                f"\n[PERFORMANCE] "
-                f"Load time: "
-                f"{load_time:.2f} seconds"
-            )
-
+            m1 = load_m1(filepath)
         except FileNotFoundError:
-
-            print(
-                "\nERROR: Could not find:"
-            )
-
-            print(filepath)
-
+            print(f"\nERROR: Could not find:\n{filepath}")
             continue
-
         except Exception as error:
-
-            print(
-                "\nERROR loading data:"
-            )
-
-            print(error)
-
+            print(f"\nERROR loading data:\n{error}")
             continue
 
-        # ====================================================
-        # GAP ANALYSIS
-        # ====================================================
+        print("\nBuilding gap table...")
+        gap_table = build_gap_table(m1)
+        print_gap_summary(gap_table, symbol)
 
-        print("\n")
-        print(
-            "Analyzing M1 timestamp gaps..."
-        )
+        print("\nBuilding session-aware 15M candles...")
+        candles_15m = build_session_aware_candles(m1, gap_table, 15)
+        print_timeframe_summary(candles_15m, "15M", symbol)
 
-        gap_start = time.perf_counter()
+        print("\nBuilding session-aware 4H candles...")
+        candles_4h = build_session_aware_candles(m1, gap_table, 240)
+        print_timeframe_summary(candles_4h, "4H", symbol)
 
-        gaps = analyze_gaps(
-            m1
-        )
-
-        gap_time = (
-            time.perf_counter()
-            - gap_start
-        )
-
-        print_gap_summary(
-            gaps,
+        write_report(
             symbol,
+            gap_table,
+            candles_15m,
+            candles_4h,
+            OUTPUT_DIR / symbol,
         )
 
-        print(
-            f"\n[PERFORMANCE] "
-            f"Gap analysis time: "
-            f"{gap_time:.2f} seconds"
-        )
+        symbol_time = time.perf_counter() - symbol_start
+        print(f"\n[PERFORMANCE] {symbol} total time: {symbol_time:.2f} seconds")
 
-        # ====================================================
-        # 15M VALIDATION
-        # ====================================================
-
-        print("\n")
-
-        print(
-            "Building 15-minute "
-            "session validation..."
-        )
-
-        validation_15m_start = (
-            time.perf_counter()
-        )
-
-        validation_15m = (
-            validate_timeframe(
-                m1,
-                15,
-            )
-        )
-
-        validation_15m_time = (
-            time.perf_counter()
-            - validation_15m_start
-        )
-
-        print_timeframe_summary(
-            validation_15m,
-            "15M",
-            symbol,
-        )
-
-        print(
-            f"\n[PERFORMANCE] "
-            f"15M validation time: "
-            f"{validation_15m_time:.2f} seconds"
-        )
-
-        # ====================================================
-        # 4H VALIDATION
-        # ====================================================
-
-        print("\n")
-
-        print(
-            "Building 4-hour "
-            "session validation..."
-        )
-
-        validation_4h_start = (
-            time.perf_counter()
-        )
-
-        validation_4h = (
-            validate_timeframe(
-                m1,
-                240,
-            )
-        )
-
-        validation_4h_time = (
-            time.perf_counter()
-            - validation_4h_start
-        )
-
-        print_timeframe_summary(
-            validation_4h,
-            "4H",
-            symbol,
-        )
-
-        print(
-            f"\n[PERFORMANCE] "
-            f"4H validation time: "
-            f"{validation_4h_time:.2f} seconds"
-        )
-
-        # ====================================================
-        # SYMBOL TOTAL
-        # ====================================================
-
-        symbol_time = (
-            time.perf_counter()
-            - symbol_start
-        )
-
-        print("\n")
-        print(
-            f"[PERFORMANCE] "
-            f"{symbol} total processing time: "
-            f"{symbol_time:.2f} seconds"
-        )
-
-    # ========================================================
-    # COMPLETE
-    # ========================================================
-
-    print("\n")
+    print("\n" + "=" * 70)
+    print("PRODUCTION SESSION MODEL COMPLETE")
     print("=" * 70)
 
-    print(
-        "SESSION VALIDATION COMPLETE"
-    )
-
-    print("=" * 70)
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
 
 if __name__ == "__main__":
     main()
