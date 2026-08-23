@@ -85,6 +85,8 @@ REQUIRED_COLUMNS = [
     "<CLOSE>",
 ]
 
+OPTIONAL_VOLUME_COLUMN = "<TICKVOL>"
+
 TIMEFRAMES = {
     "15M": 15,
     "4H": 240,
@@ -238,11 +240,16 @@ def load_m1(filepath):
     df["Low"] = df["<LOW>"]
     df["Close"] = df["<CLOSE>"]
 
+    if OPTIONAL_VOLUME_COLUMN in df.columns:
+        df["TickVolume"] = pd.to_numeric(df[OPTIONAL_VOLUME_COLUMN], errors="coerce").fillna(0)
+    else:
+        df["TickVolume"] = 0.0
+
     print(f"\nSuccessfully loaded {len(df):,} M1 candles.")
     print(f"First candle: {df['Datetime'].iloc[0]}")
     print(f"Last candle:  {df['Datetime'].iloc[-1]}")
 
-    return df[["Datetime", "Open", "High", "Low", "Close"]].copy()
+    return df[["Datetime", "Open", "High", "Low", "Close", "TickVolume"]].copy()
 
 
 # ============================================================
@@ -330,6 +337,7 @@ def build_session_aware_candles(m1, gap_table, timeframe_minutes):
         High=("High", "max"),
         Low=("Low", "min"),
         Close=("Close", "last"),
+        Volume=("TickVolume", "sum"),
         M1_Count=("Close", "count"),
     )
 
@@ -392,6 +400,7 @@ def build_session_aware_candles(m1, gap_table, timeframe_minutes):
             "High",
             "Low",
             "Close",
+            "Volume",
             "M1_Count",
             "Expected_M1",
             "Missing_M1",
