@@ -25,6 +25,14 @@ data/raw/*.csv
 data/raw/*.zip
 data/raw/*.parquet
 
+# Derived/regenerable outputs - rebuild anytime via:
+#   python src/session_validator.py
+#   python src/indicator_engine.py
+#   python src/signal_engine.py
+data/session_model_production/**/*.csv
+data/indicators_production/**/*.csv
+data/signals_production/**/*.csv
+
 # VS Code
 .vscode/
 
